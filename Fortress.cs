@@ -11,16 +11,24 @@ namespace TaskbarFortress
 {
     public static class Ballistics
     {
-        public const double Gravity = 620;
-        public const double Angle = Math.PI / 4;
+        public const double Gravity = 350;
+        public const double Angle = 25 * Math.PI / 180;
+        public static double GravityForRange(double range, double height)
+        {
+            // Preserve the landing point while taking exactly 90% of the previous
+            // 20-degree trajectory's flight time, including the muzzle height.
+            double previousRise = height + range * Math.Tan(Math.PI / 9);
+            return Gravity * (height + range * Math.Tan(Angle)) / (previousRise * 0.9 * 0.9);
+        }
         public static double SpeedForRange(double range, double height)
         {
-            return Math.Sqrt(Gravity * range * range / (2 * Math.Cos(Angle) * Math.Cos(Angle) * (height + range * Math.Tan(Angle))));
+            double gravity = GravityForRange(range, height);
+            return Math.Sqrt(gravity * range * range / (2 * Math.Cos(Angle) * Math.Cos(Angle) * (height + range * Math.Tan(Angle))));
         }
-        public static PointF Position(PointF start, double speed, double time)
+        public static PointF Position(PointF start, double speed, double time, double gravity)
         {
             return new PointF((float)(start.X + speed * Math.Cos(Angle) * time),
-                (float)(start.Y - speed * Math.Sin(Angle) * time + Gravity * time * time / 2));
+                (float)(start.Y - speed * Math.Sin(Angle) * time + gravity * time * time / 2));
         }
     }
 
@@ -43,13 +51,13 @@ namespace TaskbarFortress
         readonly Color ink = Color.FromArgb(22, 30, 45);
         readonly Color green = Color.FromArgb(102, 235, 177);
         static readonly string[] TankPixels = {
-            "................DD..",
-            "...............DLD..",
-            "..............DLD...",
-            ".............DLD....",
-            ".......DDDD.DLD.....",
-            "......DLLLLDLD......",
-            "......DGGGGGD.......",
+            "....................",
+            "....................",
+            "....................",
+            ".................DDD",
+            ".......DDDD...DDDLLD",
+            "......DLLLLDDDLLDDD.",
+            "......DGGGGGDDDD....",
             "...DDDDGGGGGDDDDD...",
             "..DLLLLLLLLLLLLLGD..",
             "..DGGGGGGGGGGGGGSD..",
@@ -74,10 +82,19 @@ namespace TaskbarFortress
         Rectangle panel;
         PointF muzzle, projectile;
         float ground, targetX;
-        double lastTime, flightTime, speed, charge, resultUntil;
+        double lastTime, flightTime, speed, charge, resultUntil, shotGravity;
         bool charging, flying, focused, wasHit;
         string result = "";
-        int hits, shots;
+        int hits, shots, combo;
+        sealed class Debris
+        {
+            public float X, Y, VX, VY, Size;
+            public double Age, Lifetime;
+            public Color Color;
+        }
+        readonly List<Debris> debris = new List<Debris>();
+        // Cosmetic randomness must not change the sequence of target positions.
+        readonly Random effectRandom = new Random();
 
         public Game()
         {
@@ -106,11 +123,12 @@ namespace TaskbarFortress
         {
             Bounds = Screen.PrimaryScreen.WorkingArea;
             ground = (ClientSize.Height - 2) / GameScale;
-            muzzle = new PointF(80, ground - 39);
+            muzzle = new PointF(87, ground - 29);
             panel = new Rectangle(126, (int)ground - 24, 200, 24);
             charging = flying = false;
             charge = 0;
             result = "";
+            debris.Clear();
             NewTarget();
         }
 
@@ -156,6 +174,7 @@ namespace TaskbarFortress
             double minRange = Math.Min(70, maxRange);
             double range = minRange + charge * (maxRange - minRange);
             speed = Ballistics.SpeedForRange(range, ground - muzzle.Y);
+            shotGravity = Ballistics.GravityForRange(range, ground - muzzle.Y);
             flightTime = 0;
             projectile = muzzle;
             flying = true;
@@ -176,12 +195,13 @@ namespace TaskbarFortress
                 for (int i = 0; i < steps && flying; i++)
                 {
                     flightTime += dt / steps;
-                    projectile = Ballistics.Position(muzzle, speed, flightTime);
+                    projectile = Ballistics.Position(muzzle, speed, flightTime, shotGravity);
                     double dx = projectile.X - targetX, dy = projectile.Y - (ground - 19);
                     if (dx * dx + dy * dy <= 23 * 23) Finish(true, now);
                     else if (projectile.Y >= ground || projectile.X > WorldWidth + 10) Finish(false, now);
                 }
             }
+            UpdateDebris(dt);
             if (result.Length > 0 && now >= resultUntil)
             {
                 if (wasHit) NewTarget();
@@ -195,9 +215,45 @@ namespace TaskbarFortress
         {
             flying = false;
             wasHit = hit;
-            if (hit) hits++;
+            if (hit)
+            {
+                hits++;
+                combo++;
+                BurstTarget();
+            }
+            else combo = 0;
             result = hit ? "HIT" : "MISS";
             resultUntil = now + 1.2;
+        }
+
+        void BurstTarget()
+        {
+            debris.Clear();
+            Color[] colors = { Color.FromArgb(238, 91, 103), Color.FromArgb(255, 236, 192),
+                Color.FromArgb(166, 43, 66), Color.FromArgb(255, 218, 123) };
+            for (int i = 0; i < 28; i++)
+                debris.Add(new Debris {
+                    X = targetX + (float)(effectRandom.NextDouble() * 30 - 15),
+                    Y = ground - 19 + (float)(effectRandom.NextDouble() * 24 - 12),
+                    VX = (float)(effectRandom.NextDouble() * 200 - 100),
+                    VY = -(float)(80 + effectRandom.NextDouble() * 160),
+                    Size = (i % 3 == 0 ? 3 : 2) / GameScale,
+                    Lifetime = 0.45 + effectRandom.NextDouble() * 0.4,
+                    Color = colors[i % colors.Length]
+                });
+        }
+
+        void UpdateDebris(double dt)
+        {
+            for (int i = debris.Count - 1; i >= 0; i--)
+            {
+                Debris p = debris[i];
+                p.Age += dt;
+                p.X += p.VX * (float)dt;
+                p.Y += p.VY * (float)dt;
+                p.VY += 420 * (float)dt;
+                if (p.Age >= p.Lifetime || p.Y >= ground) debris.RemoveAt(i);
+            }
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -231,13 +287,18 @@ namespace TaskbarFortress
             }
 
             DrawPixelSprite(g, TankPixels, TankOriginX, ground);
-            DrawPixelSprite(g, TargetPixels, targetX, ground);
+            if (!(wasHit && result.Length > 0)) DrawPixelSprite(g, TargetPixels, targetX, ground);
+            foreach (Debris p in debris)
+            {
+                float size = p.Age > p.Lifetime * 0.65 ? 1 / GameScale : p.Size;
+                PixelRect(g, p.Color, p.X - size / 2, p.Y - size / 2, size, size);
+            }
             if (flying)
             {
                 for (int i = 5; i >= 0; i--)
                 {
                     double t = Math.Max(0, flightTime - i * 0.025);
-                    PointF p = Ballistics.Position(muzzle, speed, t);
+                    PointF p = Ballistics.Position(muzzle, speed, t, shotGravity);
                     float radius = i == 0 ? 5 : 2;
                     PixelRect(g, i == 0 ? ink : Color.FromArgb(154, 171, 190), p.X - radius, p.Y - radius, radius * 2, radius * 2);
                     if (i == 0) PixelRect(g, Color.FromArgb(255, 218, 123), p.X - 3, p.Y - 3, 6, 6);
@@ -246,12 +307,19 @@ namespace TaskbarFortress
             if (result.Length > 0)
             {
                 SizeF size = new SizeF(TextWidth(result, 2), 14 / GameScale);
+                string comboText = wasHit && combo >= 2 ? combo + " COMBO" : "";
+                float labelWidth = Math.Max(size.Width, TextWidth(comboText, 1));
                 float x = targetX + 31;
-                if (x + size.Width + 6 > WorldWidth)
-                    x = targetX - 31 - size.Width;
+                if (x + labelWidth + 6 > WorldWidth)
+                    x = targetX - 31 - labelWidth;
                 float y = ground - 19 - size.Height / 2;
                 PixelRect(g, ink, x - 6, y - 4, size.Width + 12, size.Height + 8);
                 DrawPixelText(g, result, 2, wasHit ? green : Color.FromArgb(255, 135, 141), x, y);
+                if (comboText.Length > 0)
+                {
+                    PixelRect(g, ink, x - 6, y - 25, labelWidth + 12, 19);
+                    DrawPixelText(g, comboText, 1, Color.FromArgb(255, 218, 123), x, y - 21);
+                }
             }
         }
 
@@ -261,7 +329,7 @@ namespace TaskbarFortress
             {'4', "02060A121F0202"}, {'5', "1F10101E01011E"},
             {'6', "0E10101E11110E"}, {'7', "1F010204080808"},
             {'8', "0E11110E11110E"}, {'9', "0E11110F01010E"},
-            {'A', "0E11111F111111"}, {'C', "0E11101010110E"},
+            {'A', "0E11111F111111"}, {'B', "1E11111E11111E"}, {'C', "0E11101010110E"},
             {'D', "1E11111111111E"}, {'E', "1F10101E10101F"},
             {'H', "1111111F111111"}, {'I', "0E04040404040E"},
             {'K', "11121418141211"}, {'L', "1010101010101F"},
