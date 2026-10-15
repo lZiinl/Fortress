@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using Microsoft.Win32;
 using System.Windows.Forms;
 
 namespace TaskbarFortress
@@ -29,7 +30,8 @@ namespace TaskbarFortress
         const float GameScale = 0.60f;
         const float TankOriginX = 55; // Center of the tank tracks is position 0.
         const double FullChargeSeconds = 2.0;
-        readonly string colorPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tank-color.txt");
+        const string SettingsKey = @"Software\TaskbarFortress";
+        readonly string legacyColorPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tank-color.txt");
         Color tankBase = Color.FromArgb(93, 184, 106);
         Color tankLight = Color.FromArgb(184, 246, 153);
         Color tankShadow = Color.FromArgb(48, 105, 79);
@@ -357,16 +359,53 @@ namespace TaskbarFortress
 
         void LoadTankColor()
         {
+            bool loaded = false;
             try
             {
-                int rgb;
-                if (File.Exists(colorPath) && int.TryParse(File.ReadAllText(colorPath).Trim(),
-                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rgb)
-                    && rgb >= 0 && rgb <= 0xFFFFFF)
-                    SetTankColor(Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255));
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(SettingsKey))
+                {
+                    object value = key == null ? null : key.GetValue("TankColor");
+                    if (value is int && (int)value >= 0 && (int)value <= 0xFFFFFF)
+                    {
+                        int rgb = (int)value;
+                        SetTankColor(Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255));
+                        loaded = true;
+                    }
+                }
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+
+            // Only remove the old file after a valid color is safely persisted.
+            try
+            {
+                int rgb;
+                if (File.Exists(legacyColorPath) && int.TryParse(File.ReadAllText(legacyColorPath).Trim(),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rgb)
+                    && rgb >= 0 && rgb <= 0xFFFFFF)
+                {
+                    if (!loaded)
+                    {
+                        SetTankColor(Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255));
+                        SaveTankColor();
+                    }
+                    File.Delete(legacyColorPath);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (System.Security.SecurityException) { }
+        }
+
+        void SaveTankColor()
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+            {
+                if (key == null) throw new IOException("Cannot open user settings.");
+                key.SetValue("TankColor", tankBase.ToArgb() & 0xFFFFFF, RegistryValueKind.DWord);
+                key.Flush();
+            }
         }
 
         void ChooseTankColor()
@@ -388,10 +427,11 @@ namespace TaskbarFortress
                         SetTankColor(picker.Color);
                         try
                         {
-                            File.WriteAllText(colorPath, (tankBase.ToArgb() & 0xFFFFFF).ToString("X6"));
+                            SaveTankColor();
                         }
                         catch (IOException) { ShowColorSaveError(); }
                         catch (UnauthorizedAccessException) { ShowColorSaveError(); }
+                        catch (System.Security.SecurityException) { ShowColorSaveError(); }
                     }
                 }
             }
@@ -409,7 +449,7 @@ namespace TaskbarFortress
 
         void ShowColorSaveError()
         {
-            MessageBox.Show(this, "색상은 적용했지만 저장하지 못했습니다. 게임 폴더의 쓰기 권한을 확인해 주세요.",
+            MessageBox.Show(this, "색상은 적용했지만 Windows 사용자 설정에 저장하지 못했습니다. 다음 실행에는 유지되지 않을 수 있습니다.",
                 "Fortress", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
