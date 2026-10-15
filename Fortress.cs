@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Windows.Forms;
 
 namespace TaskbarFortress
@@ -27,6 +28,12 @@ namespace TaskbarFortress
         // Rendering, mouse input and physics share compact logical coordinates.
         const float GameScale = 0.60f;
         const float TankOriginX = 55; // Center of the tank tracks is position 0.
+        const double FullChargeSeconds = 2.0;
+        readonly string colorPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tank-color.txt");
+        Color tankBase = Color.FromArgb(93, 184, 106);
+        Color tankLight = Color.FromArgb(184, 246, 153);
+        Color tankShadow = Color.FromArgb(48, 105, 79);
+        bool choosingColor;
         float WorldWidth { get { return ClientSize.Width / GameScale; } }
         readonly Timer timer = new Timer();
         readonly Stopwatch clock = Stopwatch.StartNew();
@@ -81,6 +88,7 @@ namespace TaskbarFortress
             DoubleBuffered = true;
             KeyPreview = true;
             StartPosition = FormStartPosition.Manual;
+            LoadTankColor();
             ResetLayout();
             Activated += delegate { focused = true; Invalidate(); };
             Deactivate += delegate { focused = false; charging = false; charge = 0; Invalidate(); };
@@ -114,8 +122,14 @@ namespace TaskbarFortress
 
         void OnMouse(object sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left) return;
             PointF worldMouse = new PointF(e.X / GameScale, e.Y / GameScale);
+            if (e.Button == MouseButtons.Right &&
+                new RectangleF(TankOriginX - 34, ground - 44, 68, 44).Contains(worldMouse))
+            {
+                ChooseTankColor();
+                return;
+            }
+            if (e.Button != MouseButtons.Left) return;
             if (new RectangleF(panel.Right - 24, panel.Top, 24, panel.Height).Contains(worldMouse)) { Close(); return; }
             Activate();
             Focus();
@@ -123,6 +137,7 @@ namespace TaskbarFortress
 
         void OnKeyDown(object sender, KeyEventArgs e)
         {
+            if (choosingColor) return;
             if (e.KeyCode == Keys.Escape) { Close(); return; }
             if (e.KeyCode != Keys.Space) return;
             e.Handled = e.SuppressKeyPress = true;
@@ -151,7 +166,7 @@ namespace TaskbarFortress
             double dt = Math.Min(0.05, now - lastTime);
             lastTime = now;
             if (Bounds != Screen.PrimaryScreen.WorkingArea) ResetLayout();
-            if (charging) charge = Math.Min(1, charge + dt / 1.5);
+            if (charging) charge = Math.Min(1, charge + dt / FullChargeSeconds);
             if (flying)
             {
                 // Small physics steps prevent a fast shell from skipping the target.
@@ -292,7 +307,7 @@ namespace TaskbarFortress
             g.Restore(state);
         }
 
-        static void DrawPixelSprite(Graphics g, string[] rows, float centerX, float bottom)
+        void DrawPixelSprite(Graphics g, string[] rows, float centerX, float bottom)
         {
             // Draw on whole device pixels to avoid blurred edges and transparency-key halos.
             GraphicsState state = g.Save();
@@ -308,9 +323,9 @@ namespace TaskbarFortress
                     switch (rows[y][x])
                     {
                         case 'D': color = Color.FromArgb(25, 32, 45); break;
-                        case 'L': color = Color.FromArgb(184, 246, 153); break;
-                        case 'G': color = Color.FromArgb(93, 184, 106); break;
-                        case 'S': color = Color.FromArgb(48, 105, 79); break;
+                        case 'L': color = tankLight; break;
+                        case 'G': color = tankBase; break;
+                        case 'S': color = tankShadow; break;
                         case 'W': color = Color.FromArgb(137, 156, 171); break;
                         case 'R': color = Color.FromArgb(238, 91, 103); break;
                         case 'C': color = Color.FromArgb(255, 236, 192); break;
@@ -321,6 +336,81 @@ namespace TaskbarFortress
                         g.FillRectangle(brush, left + x * pixel, top + y * pixel, pixel, pixel);
                 }
             g.Restore(state);
+        }
+
+        static Color OpaqueTankColor(Color color)
+        {
+            // Pure magenta is the window's transparency key, so keep it visible.
+            return color.R == 255 && color.G == 0 && color.B == 255
+                ? Color.FromArgb(255, 1, 255) : Color.FromArgb(color.R, color.G, color.B);
+        }
+
+        void SetTankColor(Color color)
+        {
+            tankBase = OpaqueTankColor(color);
+            tankLight = OpaqueTankColor(Color.FromArgb(
+                tankBase.R + (255 - tankBase.R) * 2 / 5,
+                tankBase.G + (255 - tankBase.G) * 2 / 5,
+                tankBase.B + (255 - tankBase.B) * 2 / 5));
+            tankShadow = Color.FromArgb(tankBase.R * 3 / 5, tankBase.G * 3 / 5, tankBase.B * 3 / 5);
+        }
+
+        void LoadTankColor()
+        {
+            try
+            {
+                int rgb;
+                if (File.Exists(colorPath) && int.TryParse(File.ReadAllText(colorPath).Trim(),
+                    System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rgb)
+                    && rgb >= 0 && rgb <= 0xFFFFFF)
+                    SetTankColor(Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        void ChooseTankColor()
+        {
+            if (choosingColor) return;
+            choosingColor = true;
+            charging = false;
+            charge = 0;
+            timer.Stop();
+            double pausedAt = clock.Elapsed.TotalSeconds;
+            try
+            {
+                using (ColorDialog picker = new ColorDialog())
+                {
+                    picker.Color = tankBase;
+                    picker.FullOpen = true;
+                    if (picker.ShowDialog(this) == DialogResult.OK)
+                    {
+                        SetTankColor(picker.Color);
+                        try
+                        {
+                            File.WriteAllText(colorPath, (tankBase.ToArgb() & 0xFFFFFF).ToString("X6"));
+                        }
+                        catch (IOException) { ShowColorSaveError(); }
+                        catch (UnauthorizedAccessException) { ShowColorSaveError(); }
+                    }
+                }
+            }
+            finally
+            {
+                double now = clock.Elapsed.TotalSeconds;
+                resultUntil += now - pausedAt;
+                lastTime = now;
+                choosingColor = false;
+                timer.Start();
+                Activate();
+                Invalidate();
+            }
+        }
+
+        void ShowColorSaveError()
+        {
+            MessageBox.Show(this, "색상은 적용했지만 저장하지 못했습니다. 게임 폴더의 쓰기 권한을 확인해 주세요.",
+                "Fortress", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         protected override void Dispose(bool disposing)
